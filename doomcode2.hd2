@@ -1,0 +1,1071 @@
+# Global definitions. #########################################################
+
+# First 8 registers are the incoming command (filled by rcmd).
+# Common for all commands.
+reg r_cmd_header 0
+# SETUP.
+reg r_cmd_surf_dst_pt 1
+reg r_cmd_surf_src_pt 2
+reg r_cmd_texture_pt 3
+reg r_cmd_flat_pt 4
+reg r_cmd_translation_pt 5
+reg r_cmd_colormap_pt 6
+reg r_cmd_tranmap_pt 7
+# Colormap indices.
+reg r_cmd_cmidx 1
+# First XY + flat index.
+reg r_cmd_xy_a 2
+# Second XY.
+reg r_cmd_xy_b 3
+# U coordinate.
+reg r_cmd_ustart 4
+reg r_cmd_ustep 5
+# Rectangle width/height and fill color.
+reg r_cmd_wh 6
+# Texture offset and dimensions (DRAW_COLUMN).
+reg r_cmd_texture_offset 6
+reg r_cmd_texture_dims 7
+# V coordinate (DRAW_SPAN).
+reg r_cmd_vstart 6
+reg r_cmd_vstep 7
+# Fuzz parameters (DRAW_FUZZ).
+reg r_cmd_fuzz 6
+
+# Used only for very short-term purposes.
+reg r_t0 8
+reg r_t1 9
+# Stores the return address from the current function (we never have more than
+# one entry on the call stack).
+reg r_ret 10
+
+# The last used translation index (-1 if never used) -- skip reloading
+# translation if unchanged.
+reg r_translation_idx 11
+# Likewise for colormap.
+reg r_colormap_idx 12
+# Likewise for flat.
+reg r_flat_idx 13
+
+# Used as payload for commands that ignore payload.
+reg r_dummy 0
+
+const xycmd_surf_dst_pt 1
+const xycmd_surf_src_pt 2
+const xycmd_surf_dst_width 3
+const xycmd_surf_src_width 4
+const xycmd_interlock 5
+const xycmd_write_dst_h 6
+const xycmd_write_dst_v 7
+const xycmd_read_src_h 8
+const xycmd_read_src_v 9
+const xycmd_read_dst_v 10
+const xycmd_rmw_dst_v 11
+
+const texcmd_texture_pt 1
+const texcmd_texture_dims 2
+const texcmd_ustart 3
+const texcmd_ustep 4
+const texcmd_start_column 5
+const texcmd_end_column 6
+const texcmd_draw_tex 7
+
+const flatcmd_flat_addr 1
+const flatcmd_ustart 2
+const flatcmd_vstart 3
+const flatcmd_ustep 4
+const flatcmd_vstep 5
+const flatcmd_read_flat 6
+const flatcmd_draw_span 7
+
+const fuzzcmd_set_column 1
+const fuzzcmd_draw_fuzz 2
+
+const ogcmd_interlock 1
+const ogcmd_fence 2
+const ogcmd_ping 3
+const ogcmd_tranmap_pt 4
+const ogcmd_fill_color 5
+const ogcmd_colormap_addr 6
+const ogcmd_translation_addr 7
+const ogcmd_draw_buf_h 8
+const ogcmd_draw_buf_v 9
+const ogcmd_copy_h 10
+const ogcmd_copy_v 11
+const ogcmd_read_flat 12
+const ogcmd_draw_span 13
+const ogcmd_draw_fuzz 14
+const ogcmd_init_fuzz 15
+const ogcmd_fuzz_column 16
+const ogcmd_draw_tex 17
+
+const err_reserved_type 0x000
+const err_reserved_bits 0x001
+const err_surf_width_zero 0x002
+const err_surf_width_ovf 0x003
+const err_draw_column_rev 0x004
+const err_draw_fuzz_rev 0x005
+const err_draw_span_rev 0x006
+
+const stat_copy_rect_horizontal 0x0
+const stat_copy_rect_line 0x1
+const stat_copy_rect_vertical 0x2
+const stat_fill_rect_horizontal 0x3
+const stat_fill_rect_line 0x4
+const stat_fill_rect_vertical 0x5
+const stat_draw_background 0x6
+const stat_draw_background_line 0x7
+const stat_draw_line_horizontal 0x8
+const stat_draw_line_vertical 0x9
+const stat_draw_line_h_chunk 0xa
+const stat_draw_line_v_chunk 0xb
+const stat_draw_line_h_pixel 0xc
+const stat_draw_line_v_pixel 0xd
+const stat_draw_column_batch 0xe
+const stat_draw_fuzz_batch 0xf
+const stat_draw_column 0x10
+const stat_draw_fuzz 0x11
+const stat_draw_column_chunk 0x12
+const stat_draw_fuzz_chunk 0x13
+const stat_ping_async 0x14
+const stat_load_flat 0x15
+const stat_load_translation 0x16
+const stat_load_colormap 0x17
+const stat_batch_end_mismatch_colormap 0x18
+const stat_batch_end_mismatch_tex_dims 0x19
+const stat_batch_end_mismatch_cmd 0x1a
+const stat_batch_end_mismatch_fuzz 0x1b
+const stat_batch_end_size 0x1c
+const stat_batch_end_xy 0x1d
+const stat_batch_end_sync 0x1e
+const stat_draw_span 0x1f
+
+const tlb_flat 4
+const tlb_translation 5
+const tlb_colormap 6
+
+const max_batch_size 102
+# Cell 0 unused (to simplify heap calculations).
+const mem_batch_events 0
+const mem_column_ustart 205
+const mem_column_ustep 307
+const mem_column_offset 409
+# Used memory ends at 511.
+
+
+# The main loop. ##############################################################
+
+start:
+	# Mark currently loaded colormaps and flat as invalid.
+	li	r_translation_idx -1
+	li	r_colormap_idx -1
+	li	r_flat_idx -1
+	# And we're ready to rock.
+main:
+	# Get the command from the FECMD fifo.
+	rcmd
+	# Do interlock and async pong if necessary.
+	bbc	r_cmd_header 4 main_no_interlock
+	xycmd	xycmd_interlock r_dummy
+	ogcmd	ogcmd_interlock r_dummy
+main_no_interlock:
+	bbc	r_cmd_header 5 dispatch
+	pong
+	stat	stat_ping_async
+	# Here starts command processing.
+dispatch:
+	# r_t0 <- command type
+	extr	r_t0 r_cmd_header 0 4
+	# Branch thru the main jump table.
+	bi	r_t0 cmd_jtab
+dispatch_end:
+	# Do fence and sync pong if necessary.
+	bbc	r_cmd_header 6 dispatch_no_pong_sync
+	ogcmd	ogcmd_ping r_dummy
+dispatch_no_pong_sync:
+	bbc	r_cmd_header 7 main
+	ogcmd	ogcmd_fence r_dummy
+	b	main
+
+cmd_reserved_type:
+	error	err_reserved_type
+	b	dispatch_end
+
+cmd_reserved_bits:
+	error	err_reserved_bits
+	b	dispatch_end
+
+cmd_jtab:
+	b	cmd_copy_rect
+	b	cmd_fill_rect
+	b	cmd_draw_line
+	b	cmd_draw_background
+	b	cmd_draw_column
+	b	cmd_draw_fuzz
+	b	cmd_draw_span
+	b	cmd_setup
+	b	cmd_reserved_type
+	b	cmd_reserved_type
+	b	cmd_reserved_type
+	b	cmd_reserved_type
+	b	cmd_reserved_type
+	b	cmd_reserved_type
+	b	cmd_reserved_type
+	b	cmd_reserved_type
+
+# The setup command. ##########################################################
+
+cmd_setup:
+	bbs	r_cmd_header 8 cmd_reserved_bits
+	extr	r_t0 r_cmd_header 22 2
+	bnei	r_t0 0 cmd_reserved_bits
+	extr	r_t0 r_cmd_header 30 2
+	bnei	r_t0 0 cmd_reserved_bits
+	# Handle SURF_DST.
+	bbc	r_cmd_header 9 setup_no_surf_dst
+	xycmd	xycmd_surf_dst_pt r_cmd_surf_dst_pt
+	extr	r_t0 r_cmd_header 16 6
+	bei	r_t0 0 setup_width_zero
+	bgi	r_t0 0x20 setup_width_ovf
+	xycmd	xycmd_surf_dst_width r_t0
+setup_no_surf_dst:
+	# Handle SURF_SRC.
+	bbc	r_cmd_header 10 setup_no_surf_src
+	xycmd	xycmd_surf_src_pt r_cmd_surf_src_pt
+	extr	r_t0 r_cmd_header 24 6
+	bei	r_t0 0 setup_width_zero
+	bgi	r_t0 0x20 setup_width_ovf
+	xycmd	xycmd_surf_src_width r_t0
+setup_no_surf_src:
+	# Handle TEXTURE.
+	bbc	r_cmd_header 11 setup_no_texture
+	texcmd	texcmd_texture_pt r_cmd_texture_pt
+setup_no_texture:
+	# Handle FLAT.
+	bbc	r_cmd_header 12 setup_no_flat
+	li	r_flat_idx -1
+	setpt	tlb_flat r_cmd_flat_pt
+setup_no_flat:
+	# Handle TRANSLATION.
+	bbc	r_cmd_header 13 setup_no_translation
+	li	r_translation_idx -1
+	setpt	tlb_translation r_cmd_translation_pt
+setup_no_translation:
+	# Handle COLORMAP.
+	bbc	r_cmd_header 14 setup_no_colormap
+	li	r_colormap_idx -1
+	setpt	tlb_colormap r_cmd_colormap_pt
+setup_no_colormap:
+	# Handle TRANMAP.
+	bbc	r_cmd_header 15 dispatch_end
+	ogcmd	ogcmd_tranmap_pt r_cmd_tranmap_pt
+	b	dispatch_end
+
+setup_width_zero:
+	error	err_surf_width_zero
+	b	dispatch_end
+setup_width_ovf:
+	error	err_surf_width_ovf
+	b	dispatch_end
+
+
+# Common colormap and flat setup code. ########################################
+
+load_translation_colormap:
+	# Handle TRANSLATION.
+	bbc	r_cmd_header 8 lcm_no_translation
+	extr	r_t0 r_cmd_cmidx 0 14
+	# If already OK, go on.
+	be	r_t0 r_translation_idx lcm_no_translation
+	# Prep vaddr.
+	mbc	r_t1 8 r_t0 0 14
+	# Translate to paddr.
+	tlb	r_t1 r_t1 tlb_translation
+	# Tell OG to slurp it.
+	ogcmd	ogcmd_translation_addr r_t1
+	# Done.
+	mov	r_translation_idx r_t0
+	stat	stat_load_translation
+lcm_no_translation:
+	bbc	r_cmd_header 9 lcm_no_colormap
+load_colormap:
+	extr	r_t0 r_cmd_cmidx 16 14
+	# If already OK, go on.
+	be	r_t0 r_colormap_idx lcm_no_colormap
+	# Prep vaddr.
+	mbc	r_t1 8 r_t0 0 14
+	# Translate to paddr.
+	tlb	r_t1 r_t1 tlb_colormap
+	# Tell OG to slurp it.
+	ogcmd	ogcmd_colormap_addr r_t1
+	# Done.
+	mov	r_colormap_idx r_t0
+	stat	stat_load_colormap
+lcm_no_colormap:
+	br	r_ret
+
+load_flat:
+	extr	r_t0 r_cmd_xy_a 22 10
+	# If already OK, go on.
+	be	r_t0 r_flat_idx lf_done
+	# Prep vaddr.
+	mbc	r_t1 12 r_t0 0 10
+	# Translate to paddr.
+	tlb	r_t1 r_t1 tlb_flat
+	# Tell FLAT to use new address.
+	flatcmd	flatcmd_flat_addr r_t1
+	# Done.
+	mov	r_flat_idx r_t0
+	stat	stat_load_flat
+lf_done:
+	br	r_ret
+
+
+# Rectangle copy & fill. ######################################################
+
+reg r_rect_height 16
+reg r_rect_width 17
+reg r_rect_dxy 18
+reg r_rect_sxy 19
+reg r_rect_draw 20
+reg r_rect_xbe 21
+reg r_rect_sxbe 22
+reg r_rect_wb 23
+reg r_rect_swb 24
+reg r_rect_end 25
+
+# Destination rectangle routine common to fill and copy.
+rect_prep_dst:
+	# Extract width and height, finish command if 0.
+	extr	r_rect_width r_cmd_wh 0 12
+	bei	r_rect_width 0 dispatch_end
+	extr	r_rect_height r_cmd_wh 12 12
+	bei	r_rect_height 0 dispatch_end
+	# Compute the last X.
+	extr	r_t0 r_cmd_xy_a 0 11
+	a	r_t0 r_t0 -1 r_rect_width
+	# Compute the last block idx.
+	extr	r_rect_xbe r_t0 6 6
+	# Compute width in blocks.
+	extr	r_rect_dxy r_cmd_xy_a 6 5
+	s	r_rect_wb r_rect_xbe 1 r_rect_dxy
+	# Build the horizontal xy command.
+	mb	r_rect_dxy 5 r_cmd_xy_a 11 11
+	dep	r_rect_dxy 16 r_rect_wb 12
+	# Build the horizontal draw command.
+	extr	r_rect_draw r_cmd_xy_a 0 11
+	dep	r_rect_draw 6 r_rect_width 12
+	# Compute the end value of the loop counter.
+	mbc	r_t0 5 r_rect_height 0 12
+	ar	r_rect_end r_rect_dxy r_t0
+	# We're done.
+	br	r_ret
+
+
+cmd_copy_rect:
+	# Prepare the destination rectangle.
+	bl	r_ret rect_prep_dst
+	# And now the source rectangle.
+	# Compute the last X.
+	extr	r_t0 r_cmd_xy_b 0 11
+	a	r_t0 r_t0 -1 r_rect_width
+	# Compute the last block idx.
+	extr	r_rect_sxbe r_t0 6 6
+	# Compute width in blocks.
+	extr	r_rect_sxy r_cmd_xy_b 6 5
+	s	r_rect_swb r_rect_sxbe 1 r_rect_sxy
+	# Build the horizontal xy command.
+	mb	r_rect_sxy 5 r_cmd_xy_b 11 11
+	dep	r_rect_sxy 16 r_rect_swb 12
+	# Prepare the source offset.
+	dep	r_rect_draw 24 r_cmd_xy_b 6
+	# Check if we can optimize to a vertical copy.
+	bnei	r_rect_swb 1 rect_copy_horiz
+	bei	r_rect_wb 1 rect_copy_v
+rect_copy_horiz:
+	stat	stat_copy_rect_horizontal
+rect_copy_loop:
+	# Copy this line.
+	xycmd	xycmd_read_src_h r_rect_sxy
+	xycmd	xycmd_write_dst_h r_rect_dxy
+	ogcmd	ogcmd_copy_h r_rect_draw
+	stat	stat_copy_rect_line
+	# Move on to the next line.
+	ai	r_rect_sxy r_rect_sxy 0x20
+	ai	r_rect_dxy r_rect_dxy 0x20
+	bne	r_rect_dxy r_rect_end rect_copy_loop
+	b	dispatch_end
+
+rect_copy_v:
+	stat	stat_copy_rect_vertical
+	# Vertical copy -- convert the prepared commands to vertical.
+	dep	r_rect_draw 12 r_rect_height 12
+	dep	r_rect_dxy 16 r_rect_height 12
+	dep	r_rect_sxy 16 r_rect_height 12
+	# Send them.
+	xycmd	xycmd_read_src_v r_rect_sxy
+	xycmd	xycmd_write_dst_v r_rect_dxy
+	ogcmd	ogcmd_copy_v r_rect_draw
+	# And that's it.
+	b	dispatch_end
+
+cmd_fill_rect:
+	# Prepare the rectangle.
+	bl	r_ret rect_prep_dst
+	# Fill the OG buffer.
+	extr	r_t0 r_cmd_wh 24 8
+	ogcmd	ogcmd_fill_color r_t0
+	# Check if we can optimize to a vertical fill.
+	bei	r_rect_wb 1 rect_fill_v
+	stat	stat_fill_rect_horizontal
+rect_fill_loop:
+	# Draw a line from the buffer.
+	xycmd	xycmd_write_dst_h r_rect_dxy
+	ogcmd	ogcmd_draw_buf_h r_rect_draw
+	stat	stat_fill_rect_line
+	# Move on the the next line.
+	ai	r_rect_dxy r_rect_dxy 0x20
+	bne	r_rect_dxy r_rect_end rect_fill_loop
+	# We're done.
+	b	dispatch_end
+
+rect_fill_v:
+	stat	stat_fill_rect_vertical
+	# Vertical fill -- convert the prepared commands to vertical.
+	dep	r_rect_draw 12 r_rect_height 12
+	dep	r_rect_dxy 16 r_rect_height 12
+	# Send them.
+	xycmd	xycmd_write_dst_v r_rect_dxy
+	ogcmd	ogcmd_draw_buf_v r_rect_draw
+	# And we're done here.
+	b	dispatch_end
+
+
+# Background. #################################################################
+
+
+cmd_draw_background:
+	# Prepare the rectangle.
+	bl	r_ret rect_prep_dst
+	# Prepare the flat.
+	bl	r_ret load_flat
+	# Tell FLAT to fetch the data.
+	mov	r_t0 r_rect_height
+	mb	r_t0 12 r_cmd_xy_a 11 6
+	flatcmd	flatcmd_read_flat r_t0
+	stat	stat_draw_background
+rect_background_loop:
+	# Fetch a flat line to the buffer.
+	ogcmd	ogcmd_read_flat r_dummy
+	# Draw a line from the buffer.
+	xycmd	xycmd_write_dst_h r_rect_dxy
+	ogcmd	ogcmd_draw_buf_h r_rect_draw
+	stat	stat_draw_background_line
+	# Move on the the next line.
+	ai	r_rect_dxy r_rect_dxy 0x20
+	bne	r_rect_dxy r_rect_end rect_background_loop
+	# We're done.
+	b	dispatch_end
+
+
+# Line drawing. ###############################################################
+
+reg r_dl_x_a 16
+reg r_dl_y_a 17
+reg r_dl_x_b 18
+reg r_dl_y_b 19
+reg r_dl_ax 20
+reg r_dl_ay 21
+reg r_dl_x 22
+reg r_dl_y 23
+reg r_dl_end 24
+reg r_dl_d 25
+reg r_dl_s 26
+reg r_dl_last 27
+
+cmd_draw_line:
+	# Fill the OG buffer.
+	extr	r_t0 r_cmd_wh 24 8
+	ogcmd	ogcmd_fill_color r_t0
+	# Extract XY coords.
+	extr	r_dl_x_a r_cmd_xy_a 0 11
+	extr	r_dl_y_a r_cmd_xy_a 11 11
+	extr	r_dl_x_b r_cmd_xy_b 0 11
+	extr	r_dl_y_b r_cmd_xy_b 11 11
+	# Compute the width and height of line projection.
+	sr	r_dl_ax r_dl_x_a r_dl_x_b
+	bbc	r_dl_ax 31 dl_ax_pos
+	sr	r_dl_ax r_dl_x_b r_dl_x_a
+dl_ax_pos:
+	sr	r_dl_ay r_dl_y_a r_dl_y_b
+	bbc	r_dl_ay 31 dl_ay_pos
+	sr	r_dl_ay r_dl_y_b r_dl_y_a
+dl_ay_pos:
+	# Decide between horizontal and vertical.
+	bg	r_dl_ay r_dl_ax dl_vertical
+	# Horizontal line -- start from the left.
+	stat	stat_draw_line_horizontal
+	bg	r_dl_x_a r_dl_x_b dl_h_ba
+	# a -> b.
+	mov	r_dl_x r_dl_x_a
+	mov	r_dl_y r_dl_y_a
+	mov	r_dl_end r_dl_x_b
+	sign	r_dl_s r_dl_y_b r_dl_y_a
+	b	dl_h_start
+dl_h_ba:
+	# b -> a.
+	mov	r_dl_x r_dl_x_b
+	mov	r_dl_y r_dl_y_b
+	mov	r_dl_end r_dl_x_a
+	sign	r_dl_s r_dl_y_a r_dl_y_b
+dl_h_start:
+	ar	r_dl_ay r_dl_ay r_dl_ay
+	sr	r_dl_d r_dl_ay r_dl_ax
+	ar	r_dl_ax r_dl_ax r_dl_ax
+	mov	r_dl_last r_dl_x
+	stat	stat_draw_line_h_pixel
+	b	dl_h_loop_entry
+dl_h_loop:
+	stat	stat_draw_line_h_pixel
+	# Do an X step.
+	ai	r_dl_x r_dl_x 1
+	ar	r_dl_d r_dl_d r_dl_ay
+dl_h_loop_entry:
+	be	r_dl_x r_dl_end dl_h_loop_exit
+	bbs	r_dl_d 31 dl_h_loop
+	# Compute block width.
+	extr	r_t1 r_dl_x 6 5
+	extr	r_t0 r_dl_last 6 5
+	s	r_t1 r_t1 1 r_t0
+	# Compute and submit XY command.
+	extr	r_t0 r_dl_last 6 5
+	dep	r_t0 5 r_dl_y 11
+	dep	r_t0 16 r_t1 6
+	xycmd	xycmd_write_dst_h r_t0
+	# Compute and submit draw command.
+	extr	r_t0 r_dl_last 0 6
+	s	r_t1 r_dl_x 1 r_dl_last
+	dep	r_t0 6 r_t1 12
+	ogcmd	ogcmd_draw_buf_h r_t0
+	# Update last X.
+	ai	r_dl_last r_dl_x 1
+	# Do a Y step.
+	ar	r_dl_y r_dl_y r_dl_s
+	sr	r_dl_d r_dl_d r_dl_ax
+	stat	stat_draw_line_h_chunk
+	b	dl_h_loop
+dl_h_loop_exit:
+	# Compute block width.
+	extr	r_t1 r_dl_x 6 5
+	extr	r_t0 r_dl_last 6 5
+	s	r_t1 r_t1 1 r_t0
+	# Compute and submit XY command.
+	extr	r_t0 r_dl_last 6 5
+	dep	r_t0 5 r_dl_y 11
+	dep	r_t0 16 r_t1 6
+	xycmd	xycmd_write_dst_h r_t0
+	# Compute and submit draw command.
+	extr	r_t0 r_dl_last 0 6
+	s	r_t1 r_dl_x 1 r_dl_last
+	dep	r_t0 6 r_t1 12
+	ogcmd	ogcmd_draw_buf_h r_t0
+	b	dispatch_end
+
+dl_vertical:
+	stat	stat_draw_line_vertical
+	# Vertical line -- start from the top.
+	bg	r_dl_y_a r_dl_y_b dl_v_ba
+	# a -> b.
+	mov	r_dl_x r_dl_x_a
+	mov	r_dl_y r_dl_y_a
+	mov	r_dl_end r_dl_y_b
+	sign	r_dl_s r_dl_x_b r_dl_x_a
+	b	dl_v_start
+dl_v_ba:
+	# b -> a.
+	mov	r_dl_x r_dl_x_b
+	mov	r_dl_y r_dl_y_b
+	mov	r_dl_end r_dl_y_a
+	sign	r_dl_s r_dl_x_a r_dl_x_b
+dl_v_start:
+	ar	r_dl_ax r_dl_ax r_dl_ax
+	sr	r_dl_d r_dl_ax r_dl_ay
+	ar	r_dl_ay r_dl_ay r_dl_ay
+	mov	r_dl_last r_dl_y
+	stat	stat_draw_line_v_pixel
+	b	dl_v_loop_entry
+dl_v_loop:
+	stat	stat_draw_line_v_pixel
+	# Do a Y step.
+	ai	r_dl_y r_dl_y 1
+	ar	r_dl_d r_dl_d r_dl_ax
+dl_v_loop_entry:
+	be	r_dl_y r_dl_end dl_v_loop_exit
+	bbs	r_dl_d 31 dl_v_loop
+	# Compute height.
+	s	r_t1 r_dl_y 1 r_dl_last
+	# Compute and submit XY command.
+	extr	r_t0 r_dl_x 6 5
+	dep	r_t0 5 r_dl_last 11
+	dep	r_t0 16 r_t1 12
+	xycmd	xycmd_write_dst_v r_t0
+	# Compute and submit draw command.
+	extr	r_t0 r_dl_x 0 6
+	depi	r_t0 6 1 6
+	dep	r_t0 12 r_t1 12
+	ogcmd	ogcmd_draw_buf_v r_t0
+	# Update last Y.
+	ai	r_dl_last r_dl_y 1
+	# Do an X step.
+	ar	r_dl_x r_dl_x r_dl_s
+	sr	r_dl_d r_dl_d r_dl_ay
+	stat	stat_draw_line_v_chunk
+	b	dl_v_loop
+dl_v_loop_exit:
+	# Compute height.
+	s	r_t1 r_dl_y 1 r_dl_last
+	# Compute and submit XY command.
+	extr	r_t0 r_dl_x 6 5
+	dep	r_t0 5 r_dl_last 11
+	dep	r_t0 16 r_t1 12
+	xycmd	xycmd_write_dst_v r_t0
+	# Compute and submit draw command.
+	extr	r_t0 r_dl_x 0 6
+	depi	r_t0 6 1 6
+	dep	r_t0 12 r_t1 12
+	ogcmd	ogcmd_draw_buf_v r_t0
+	b	dispatch_end
+
+
+# Column drawing. #############################################################
+
+# These are valid between commands while a batch is active.
+# Last column's X coordinate.
+reg r_batch_lx 16
+# Last column's end Y coordinate.
+reg r_batch_ly 17
+# Block X coordinate of the current batch.
+reg r_batch_xb 18
+# How many columns are already active in the batch.
+reg r_batch_size 19
+# The command header for this batch (with sync bits masked off).
+reg r_batch_header 20
+# The texture dimensions for the current batch (for DRAW_COLUMN).
+reg r_batch_texture_dims 21
+# The FUZZ_START and FUZZ_END for the current batch -- for DRAW_FUZZ.
+reg r_batch_fuzz_start 21
+reg r_batch_fuzz_end 22
+
+cmd_draw_column:
+	# Check Y coords.
+	extr	r_t0 r_cmd_xy_a 11 11
+	extr	r_t1 r_cmd_xy_b 11 11
+	bg	r_t0 r_t1 dc_err_rev
+	# Give TEX the dimensions and store them.
+	mov	r_batch_texture_dims r_cmd_texture_dims
+	texcmd	texcmd_texture_dims r_cmd_texture_dims
+	# Remember the batch header.
+	extr	r_batch_header r_cmd_header 0 4
+	mb	r_batch_header 8 r_cmd_header 8 3
+	# Prepare the colormaps.
+	bl	r_ret load_translation_colormap
+	# Initialize the batch.
+	li	r_batch_size 0
+	extr	r_batch_xb r_cmd_xy_a 6 5
+	# Bump the counter.
+	stat	stat_draw_column_batch
+	# Go to the in-batch path.
+	b	dc_add_column
+
+cmd_draw_fuzz:
+	# Extract fuzz area coords.
+	extr	r_batch_fuzz_start r_cmd_fuzz 0 11
+	extr	r_batch_fuzz_end r_cmd_fuzz 12 11
+	# Check Y coords.
+	extr	r_t0 r_cmd_xy_a 11 11
+	extr	r_t1 r_cmd_xy_b 11 11
+	bg	r_batch_fuzz_start r_t0 dc_err_fuzz_rev
+	bg	r_t0 r_t1 dc_err_fuzz_rev
+	bg	r_t1 r_batch_fuzz_end dc_err_fuzz_rev
+	# Remember the batch header.
+	extr	r_batch_header r_cmd_header 0 4
+	mb	r_batch_header 8 r_cmd_header 8 3
+	# Prepare the colormap.
+	bl	r_ret load_colormap
+	# Initialize the batch.
+	li	r_batch_size 0
+	extr	r_batch_xb r_cmd_xy_a 6 5
+	# Bump the counter.
+	stat	stat_draw_fuzz_batch
+	# Do an interlock.
+	xycmd	xycmd_interlock r_dummy
+	ogcmd	ogcmd_interlock r_dummy
+	# Go to the in-batch path.
+	b	dc_add_column
+
+dc_err_rev:
+	error	err_draw_column_rev
+	b	dispatch_end
+
+dc_err_fuzz_rev:
+	error	err_draw_fuzz_rev
+	b	dispatch_end
+
+
+# Temporaries for dc_add_column.
+reg r_dc_event 24
+reg r_dc_idx 25
+
+dc_add_column:
+	# Remember the last coords.
+	extr	r_batch_lx r_cmd_xy_a 0 11
+	extr	r_batch_ly r_cmd_xy_b 11 11
+	# Store the current column info to the arrays.
+	st	r_cmd_ustart r_batch_size mem_column_ustart
+	st	r_cmd_ustep r_batch_size mem_column_ustep
+	# Note: r_cmd_texture_offset is the same register as r_cmd_fuzz.
+	st	r_cmd_texture_offset r_batch_size mem_column_offset
+	# Build start event.
+	ai	r_dc_event r_batch_size 1
+	mb	r_dc_event 7 r_cmd_xy_a 0 6
+	mb	r_dc_event 13 r_cmd_xy_a 11 11
+	# Store it to the heap.
+	a	r_dc_idx r_batch_size 1 r_batch_size
+	bl	r_ret dc_heap_store
+	# Build end event.
+	mbc	r_dc_event 7 r_cmd_xy_a 0 6
+	extr	r_t0 r_cmd_xy_b 11 11
+	ai	r_t0 r_t0 1
+	dep	r_dc_event 13 r_t0 12
+	# Store it to the heap.
+	a	r_dc_idx r_batch_size 2 r_batch_size
+	bl	r_ret dc_heap_store
+	# Bump the counter.
+	ai	r_batch_size r_batch_size 1
+	# Bump the stat.
+	bbs	r_cmd_header 0 dc_stat_fuzz
+	stat	stat_draw_column
+	b	dc_stat_done
+dc_stat_fuzz:
+	stat	stat_draw_fuzz
+dc_stat_done:
+	# If PING_SYNC or FENCE is set on this command, we need to end the batch.
+	bbs	r_cmd_header 6 dc_end_cold
+	bbs	r_cmd_header 7 dc_end_cold
+	# Otherwise, let's wait for more columns -- get a new FECMD.
+	rcmd
+	# Do interlock and async pong if necessary.
+	bbc	r_cmd_header 4 dc_no_interlock
+	xycmd	xycmd_interlock r_dummy
+	ogcmd	ogcmd_interlock r_dummy
+dc_no_interlock:
+	bbc	r_cmd_header 5 dc_no_pong_async
+	pong
+	stat	stat_ping_async
+dc_no_pong_async:
+	# Now take a look at the command and see if it's batchable.  If not,
+	# flush the batch and let the main loop handle it instead.
+	# Check the batch header.
+	extr	r_t0 r_cmd_header 0 4
+	mb	r_t0 8 r_cmd_header 8 3
+	bne	r_t0 r_batch_header dc_end_hot_cmd
+	bbs	r_cmd_header 0 dc_check_fuzz
+	# If we're doing DRAW_COLUMN batch, check texture dims.
+	bne	r_cmd_texture_dims r_batch_texture_dims dc_end_hot_tex_dims
+	# Check Y coords.  If wrong, do a hot end and let the next batch start report the error.
+	extr	r_t0 r_cmd_xy_a 11 11
+	extr	r_t1 r_cmd_xy_b 11 11
+	bg	r_t0 r_t1 dc_end_hot_xy
+	# Check the colormap indices.
+	bbc	r_cmd_header 8 dc_check_no_translation
+	extr	r_t0 r_cmd_cmidx 0 14
+	bne	r_t0 r_translation_idx dc_end_hot_cm
+dc_check_no_translation:
+	bbc	r_cmd_header 8 dc_check_no_colormap
+	extr	r_t0 r_cmd_cmidx 16 14
+	bne	r_t0 r_colormap_idx dc_end_hot_cm
+dc_check_no_colormap:
+	b	dc_check_common
+dc_check_fuzz:
+	# If we're doing DRAW_FUZZ batch, check fuzz area.
+	extr	r_t0 r_cmd_fuzz 0 11
+	bne	r_t0 r_batch_fuzz_start dc_end_hot_fuzz
+	extr	r_t0 r_cmd_fuzz 12 11
+	bne	r_t0 r_batch_fuzz_end dc_end_hot_fuzz
+	# Check Y coords.
+	extr	r_t0 r_cmd_xy_a 11 11
+	extr	r_t1 r_cmd_xy_b 11 11
+	bg	r_batch_fuzz_start r_t0 dc_end_hot_xy
+	bg	r_t0 r_t1 dc_end_hot_xy
+	bg	r_t1 r_batch_fuzz_end dc_end_hot_xy
+	# Check colormap index.
+	extr	r_t0 r_cmd_cmidx 16 14
+	bne	r_t0 r_colormap_idx dc_end_hot_cm
+dc_check_common:
+	# If we're full, finish the batch.
+	bei	r_batch_size max_batch_size dc_end_hot_size
+	# If we're not in the same column block, finish the batch.
+	extr	r_t0 r_cmd_xy_a 6 5
+	bne	r_t0 r_batch_xb dc_end_hot_xy
+	# If X coord goes backwards, flush the batch.
+	extr	r_t0 r_cmd_xy_a 0 11
+	bg	r_batch_lx r_t0 dc_end_hot_xy
+	# If it goes forward, we're ok.
+	bne	r_batch_lx r_t0 dc_add_column
+	# If it's the same as last column, check Y.
+	extr	r_t0 r_cmd_xy_a 11 11
+	bg	r_t0 r_batch_ly dc_add_column
+dc_end_hot_xy:
+	stat	stat_batch_end_xy
+dc_end_hot:
+	# A "hot" ending of the batch, with a pending command (that didn't fit
+	# in the batch).
+	# Flush the batch.
+	bl	r_ret dc_flush
+	# And let the main loop handle the command.
+	b	dispatch
+dc_end_hot_cm:
+	stat	stat_batch_end_mismatch_colormap
+	b	dc_end_hot
+dc_end_hot_tex_dims:
+	stat	stat_batch_end_mismatch_tex_dims
+	b	dc_end_hot
+dc_end_hot_cmd:
+	stat	stat_batch_end_mismatch_cmd
+	b	dc_end_hot
+dc_end_hot_fuzz:
+	stat	stat_batch_end_mismatch_fuzz
+	b	dc_end_hot
+dc_end_hot_size:
+	stat	stat_batch_end_size
+	b	dc_end_hot
+
+dc_end_cold:
+	# A "cold" ending of the batch, with no pending next command.
+	# Caused by FENCE or PING_SYNC bit set on the last command in batch.
+	stat	stat_batch_end_sync
+	# Flush the batch.
+	bl	r_ret dc_flush
+	# And let the main loop handle the sync bits.
+	b	dispatch_end
+
+# Store r_dc_event to r_dc_idx into the heap, then move it up
+# as necessary.
+dc_heap_store:
+	# If already at the top, we're done.
+	bei	r_dc_idx 1 dc_heap_store_end
+	# Compute parent's index.
+	extr	r_t0 r_dc_idx 1 31
+	# Load parent.
+	ld	r_t1 r_t0 mem_batch_events
+	# If parent is smaller, we're done.
+	ble	r_t1 r_dc_event dc_heap_store_end
+	# We're smaller than the parent.  Store the parent to our index, and
+	# retry with parent's index.
+	st	r_t1 r_dc_idx mem_batch_events
+	mov	r_dc_idx r_t0
+	b	dc_heap_store
+dc_heap_store_end:
+	st	r_dc_event r_dc_idx mem_batch_events
+	br	r_ret
+
+# Temporaries for dc_flush -- all stages.
+# How many events are still left to process (in the heap).
+reg r_fl_hsize 24
+# How many columns are currently active.
+reg r_fl_active_columns 25
+# The Y coordinate of the last event.
+reg r_fl_ly 26
+# The Y coordinate of the next event.
+reg r_fl_ny 27
+# The event currently being handled.
+reg r_fl_event 28
+
+# Temporaries -- heap fix.
+# Parent index.
+reg r_fl_pidx 29
+# Child index.
+reg r_fl_cidx 30
+# The heap element currently being moved.
+reg r_fl_hcur 31
+
+# Temporaries -- drawing.
+# Height of the segment currently being drawn.
+reg r_fl_height 29
+
+# Temporaries -- event handling.
+# Column X coordinate.
+reg r_fl_x 29
+# Column data index in memory, plus 1.
+reg r_fl_ip1 30
+
+# Flush the batch.
+dc_flush:
+	ar	r_fl_hsize r_batch_size r_batch_size
+	li	r_fl_active_columns 0
+fl_loop:
+	# Load the event from heap top.
+	li	r_fl_pidx 1
+	ld	r_fl_event r_fl_pidx mem_batch_events
+	# Fetch new heap top from the last element.
+	ld	r_fl_hcur r_fl_hsize mem_batch_events
+	ai	r_fl_hsize r_fl_hsize -1
+	# Now, move it down.
+fl_heap_down:
+	# Children are cidx, cidx+1.
+	ar	r_fl_cidx r_fl_pidx r_fl_pidx
+	# If both children OOB, we're done.
+	bg	r_fl_cidx r_fl_hsize fl_heap_done
+	# Load left child.
+	ld	r_t0 r_fl_cidx mem_batch_events
+	# If right OOB, just use this one.
+	be	r_fl_cidx r_fl_hsize fl_heap_down_gotchild
+	# Load right child.
+	ld	r_t1 r_fl_cidx mem_batch_events+1
+	# If left is smaller, use left.
+	ble	r_t0 r_t1 fl_heap_down_gotchild
+	# Otherwise, use right.
+	mov	r_t0 r_t1
+	ai	r_fl_cidx r_fl_cidx 1
+fl_heap_down_gotchild:
+	# If we're smaller than the child, we're done.
+	ble	r_fl_hcur r_t0 fl_heap_done
+	# Otherwise, store child in our place, then move down.
+	st	r_t0 r_fl_pidx mem_batch_events
+	mov	r_fl_pidx r_fl_cidx
+	b	fl_heap_down
+fl_heap_done:
+	# And the final resting place.
+	st	r_fl_hcur r_fl_pidx mem_batch_events
+	# Done with heap.  Now, if any columns are active, we need to draw
+	# them until the next event's Y.
+	extr	r_fl_ny r_fl_event 13 12
+	bei	r_fl_active_columns 0 fl_handle_event
+	be	r_fl_ny r_fl_ly fl_handle_event
+	sr	r_fl_height r_fl_ny r_fl_ly
+	bbs	r_cmd_header 0 fl_draw_fuzz
+	# Non-FUZZ column batch draw.
+	mov	r_t0 r_batch_xb
+	dep	r_t0 5 r_fl_ly 11
+	dep	r_t0 16 r_fl_height 12
+	xycmd	xycmd_write_dst_v r_t0
+	texcmd	texcmd_draw_tex r_fl_height
+	mb	r_fl_height 24 r_cmd_header 8 3
+	ogcmd	ogcmd_draw_tex r_fl_height
+	stat	stat_draw_column_chunk
+	b	fl_handle_event
+fl_draw_fuzz:
+	# FUZZ column batch draw.
+	mov	r_t0 r_batch_xb
+	dep	r_t0 5 r_fl_ly 11
+	dep	r_t0 16 r_fl_height 12
+	xycmd	xycmd_rmw_dst_v r_t0
+	fuzzcmd	fuzzcmd_draw_fuzz r_fl_height
+	ogcmd	ogcmd_draw_fuzz r_fl_height
+	stat	stat_draw_fuzz_chunk
+fl_handle_event:
+	# Update last Y, extract event fields.
+	mov	r_fl_ly r_fl_ny
+	extr	r_fl_ip1 r_fl_event 0 7
+	extr	r_fl_x r_fl_event 7 6
+	bbs	r_cmd_header 0 fl_handle_fuzz_event
+	bei	r_fl_ip1 0 fl_end_column
+	# Non-FUZZ start column.
+	ld	r_t0 r_fl_ip1 mem_column_ustart-1
+	texcmd	texcmd_ustart r_t0
+	ld	r_t0 r_fl_ip1 mem_column_ustep-1
+	texcmd	texcmd_ustep r_t0
+	ld	r_t0 r_fl_ip1 mem_column_offset-1
+	dep	r_t0 22 r_fl_x 6
+	texcmd	texcmd_start_column r_t0
+	ai	r_fl_active_columns r_fl_active_columns 1
+	b	fl_loop
+fl_end_column:
+	# Non-FUZZ end column.
+	texcmd	texcmd_end_column r_fl_x
+	ai	r_fl_active_columns r_fl_active_columns -1
+	bnei	r_fl_hsize 0 fl_loop
+	br	r_ret
+fl_handle_fuzz_event:
+	ogcmd	ogcmd_fuzz_column r_fl_x
+	bei	r_fl_ip1 0 fl_end_fuzz_column
+	# FUZZ start column.
+	ld	r_t0 r_fl_ip1 mem_column_offset-1
+	extr	r_t0 r_t0 24 6
+	dep	r_t0 6 r_fl_x 6
+	fuzzcmd	fuzzcmd_set_column r_t0
+	ai	r_fl_active_columns r_fl_active_columns 1
+	bnei	r_fl_active_columns 1 fl_loop
+	# If we went inactive -> active, init OG.
+	mov	r_t0 r_batch_xb
+	ai	r_t1 r_fl_ny -1
+	# Special case -- if column starts at FUZZ_START, avoid reading from row FUZZ_START-1.
+	bne	r_fl_ny r_batch_fuzz_start fl_init_non0
+	mov	r_t1 r_batch_fuzz_start
+fl_init_non0:
+	dep	r_t0 5 r_t1 11
+	depi	r_t0 16 1 12
+	xycmd	xycmd_read_dst_v r_t0
+	ogcmd	ogcmd_init_fuzz r_t0
+	# Resend the column command -- it got cleared.
+	ogcmd	ogcmd_fuzz_column r_fl_x
+	b	fl_loop
+fl_end_fuzz_column:
+	# FUZZ end column.
+	ai	r_fl_active_columns r_fl_active_columns -1
+	bnei	r_fl_active_columns 0 fl_loop
+	# If we went active -> inactive, read the final line.
+	mov	r_t0 r_batch_xb
+	dep	r_t0 5 r_fl_ny 11
+	# Special case -- if column ends at last line, avoid reading from OOB.
+	ai	r_t1 r_batch_fuzz_end -1
+	bne	r_fl_ny r_t1 fl_fini_nonoob
+	dep	r_t0 5 r_batch_fuzz_end 11
+fl_fini_nonoob:
+	depi	r_t0 16 1 12
+	xycmd	xycmd_read_dst_v r_t0
+	bnei	r_fl_hsize 0 fl_loop
+	br	r_ret
+
+
+
+# Span drawing. ###############################################################
+
+reg r_ds_width 16
+
+cmd_draw_span:
+	# Prepare the colormaps.
+	bl	r_ret load_translation_colormap
+	# Prepare the flat.
+	bl	r_ret load_flat
+	# Check X coords.
+	extr	r_t0 r_cmd_xy_a 0 11
+	extr	r_t1 r_cmd_xy_b 0 11
+	bg	r_t0 r_t1 ds_err_rev
+	# Submit the *start commands.
+	flatcmd	flatcmd_ustart r_cmd_ustart
+	flatcmd	flatcmd_vstart r_cmd_vstart
+	flatcmd	flatcmd_ustep r_cmd_ustep
+	flatcmd	flatcmd_vstep r_cmd_vstep
+	# Tell FLAT to emit pixels.
+	s	r_ds_width r_t1 1 r_t0
+	flatcmd	flatcmd_draw_span r_ds_width
+	# Compute block width.
+	extr	r_t0 r_cmd_xy_a 6 5
+	extr	r_t1 r_cmd_xy_b 6 5
+	s	r_t1 r_t1 1 r_t0
+	# Tell XY to generate destination addresses.
+	extr	r_t0 r_cmd_xy_a 6 5
+	mb	r_t0 5 r_cmd_xy_a 11 11
+	dep	r_t0 16 r_t1 6
+	xycmd	xycmd_write_dst_h r_t0
+	# And tell OG to write them.
+	extr	r_t0 r_cmd_xy_a 0 6
+	dep	r_t0 6 r_ds_width 12
+	mb	r_t0 24 r_cmd_header 8 3
+	ogcmd	ogcmd_draw_span r_t0
+	stat	stat_draw_span
+	b	dispatch_end
+
+ds_err_rev:
+	error	err_draw_span_rev
+	b	dispatch_end
