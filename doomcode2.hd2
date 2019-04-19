@@ -780,7 +780,7 @@ dc_no_pong_async:
 	extr	r_t0 r_cmd_cmidx 0 14
 	bne	r_t0 r_translation_idx dc_end_hot_cm
 dc_check_no_translation:
-	bbc	r_cmd_header 8 dc_check_no_colormap
+	bbc	r_cmd_header 9 dc_check_no_colormap
 	extr	r_t0 r_cmd_cmidx 16 14
 	bne	r_t0 r_colormap_idx dc_end_hot_cm
 dc_check_no_colormap:
@@ -942,14 +942,14 @@ fl_heap_done:
 	bei	r_fl_active_columns 0 fl_handle_event
 	be	r_fl_ny r_fl_ly fl_handle_event
 	sr	r_fl_height r_fl_ny r_fl_ly
-	bbs	r_cmd_header 0 fl_draw_fuzz
+	bbs	r_batch_header 0 fl_draw_fuzz
 	# Non-FUZZ column batch draw.
 	mov	r_t0 r_batch_xb
 	dep	r_t0 5 r_fl_ly 11
 	dep	r_t0 16 r_fl_height 12
 	xycmd	xycmd_write_dst_v r_t0
 	texcmd	texcmd_draw_tex r_fl_height
-	mb	r_fl_height 24 r_cmd_header 8 3
+	mb	r_fl_height 24 r_batch_header 8 3
 	ogcmd	ogcmd_draw_tex r_fl_height
 	stat	stat_draw_column_chunk
 	b	fl_handle_event
@@ -967,7 +967,7 @@ fl_handle_event:
 	mov	r_fl_ly r_fl_ny
 	extr	r_fl_ip1 r_fl_event 0 7
 	extr	r_fl_x r_fl_event 7 6
-	bbs	r_cmd_header 0 fl_handle_fuzz_event
+	bbs	r_batch_header 0 fl_handle_fuzz_event
 	bei	r_fl_ip1 0 fl_end_column
 	# Non-FUZZ start column.
 	ld	r_t0 r_fl_ip1 mem_column_ustart-1
@@ -1017,7 +1017,7 @@ fl_end_fuzz_column:
 	mov	r_t0 r_batch_xb
 	dep	r_t0 5 r_fl_ny 11
 	# Special case -- if column ends at last line, avoid reading from OOB.
-	ai	r_t1 r_batch_fuzz_end -1
+	ai	r_t1 r_batch_fuzz_end 1
 	bne	r_fl_ny r_t1 fl_fini_nonoob
 	dep	r_t0 5 r_batch_fuzz_end 11
 fl_fini_nonoob:
